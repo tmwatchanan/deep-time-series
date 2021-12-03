@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import tensorflow as tf
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 
 import ltc_model as ltc
 from ctrnn_model import CTGRU, CTRNN, NODE
@@ -23,92 +23,81 @@ def convert_to_floats(feature_col, memory):
             memory[i] = feature_col[i]
     return feature_col, memory
 
+
 def moving_average(x, w):
     return np.convolve(x, np.ones(w), 'same') / w
-
-def load_netflix_stock_data():
-    all_x = []
-    with open("data/netflix/NFLX.csv", "r") as f:
-        lineno = -1
-        memory = [i for i in range(6)]
-        for line in f:
-            lineno += 1
-            if(lineno == 0):
-                continue
-            arr = line.split(",")
-            if(len(arr) < 7):
-                continue
-            feature_col = arr[1:4+1]
-            feature_col, memory = convert_to_floats(feature_col, memory)
-            all_x.append(np.array(feature_col, dtype=np.float32))
-
-    all_x = np.stack(all_x, axis=0)
-
-    all_y = all_x[:, 3].reshape([-1, 1])
-    all_x = all_x[:, 0:2+1]
-    for i in range(all_y.shape[1]):
-        all_x[:, i] = moving_average(all_x[:, i], 3)
-
-    return all_x, all_y
 
 
 def cut_in_sequences(x, y, seq_len, inc=1):
     sequences_x = []
     sequences_y = []
 
-    for s in range(0, x.shape[0] - seq_len, inc):
-        start = s
-        end = start+seq_len
+    for end in range(seq_len, x.shape[0]+1):
+        start = end - seq_len
         sequences_x.append(x[start:end])
-        sequences_y.append(y[start:end])
+        sequences_y.append(np.repeat(y[end-1], seq_len))
 
-    return np.stack(sequences_x, axis=1), np.stack(sequences_y, axis=1)
+    return np.stack(sequences_x, axis=1), np.stack(sequences_y, axis=1)[:, :, None]
 
 
 class NetflixData:
-    def __init__(self, seq_len=32):
-        x, y = load_netflix_stock_data()
+    def __init__(self, file, seq_len=32):
+        self.file = file
+        self.X, self.Y = self.read_netflix_stock_data(file)
+        print(self.X.min(), self.X.max())
+        print(self.Y.min(), self.Y.max())
+        self.preprocess_data()
 
-        # normalization
-        self.scaler_x = StandardScaler()
-        self.scaler_y = StandardScaler()
-        x = self.scaler_x.fit_transform(x)
-        y = self.scaler_y.fit_transform(y)
+        print(self.X.shape)
+        print(self.Y.shape)
+        print(self.X.min(), self.X.max())
+        print(self.Y.min(), self.Y.max())
 
-        self.x, self.y = cut_in_sequences(x, y, seq_len, inc=seq_len)
-        asd = np.transpose(self.y, (1, 0, 2)).reshape(-1, 1)
-        print(asd.shape)
+        self.split_data(test_index=3930, training_ratio=0.8)
+        print(self.X_train.shape, self.X_valid.shape, self.X_test.shape)
 
-        fig, ax = plt.subplots()
-        ax.plot(asd)
-        plt.savefig('y.png', dpi=300)
+        self.X_train_seq, self.Y_train_seq = cut_in_sequences(self.X_train, self.Y_train, seq_len, inc=seq_len)
+        self.X_valid_seq, self.Y_valid_seq = cut_in_sequences(self.X_valid, self.Y_valid, seq_len, inc=seq_len)
+        self.X_test_seq, self.Y_test_seq = cut_in_sequences(self.X_test, self.Y_test, seq_len, inc=seq_len)
+        print(self.X_train_seq.shape, self.X_valid_seq.shape, self.X_test_seq.shape)
+        print(self.Y_train_seq.shape, self.Y_valid_seq.shape, self.Y_test_seq.shape)
 
-        print("train_x.shape:", str(self.x.shape))
-        print("train_y.shape:", str(self.y.shape))
+    def read_netflix_stock_data(self, file_path):
+        df = pd.read_csv('data/netflix/NFLX.csv')
+        X = df[['High', 'Open', 'Low', 'Volume']].to_numpy()
+        Y = df['Close'].to_numpy()
+        Y = Y[:, None]
+        # for i in range(all_y.shape[1]):
+        #     all_x[:, i] = moving_average(all_x[:, i], 3)
+        print('X', X.shape)
+        print('Y', Y.shape)
+        return X, Y
 
-        total_seqs = self.x.shape[1]
-        print("Total number of training sequences: {}".format(total_seqs))
-        permutation = np.random.RandomState(23489).permutation(total_seqs)
-        valid_size = int(0.1*total_seqs)
-        test_size = int(0.15*total_seqs)
+    def preprocess_data(self):
+        self.scaler_x = MinMaxScaler()
+        self.scaler_y = MinMaxScaler()
+        self.X = self.scaler_x.fit_transform(self.X)
+        self.Y = self.scaler_y.fit_transform(self.Y)
 
-        self.valid_x = self.x[:, permutation[:valid_size]]
-        self.valid_y = self.y[:, permutation[:valid_size]]
-        self.test_x = self.x[:, permutation[valid_size:valid_size+test_size]]
-        self.test_y = self.y[:, permutation[valid_size:valid_size+test_size]]
-        self.train_x = self.x[:, permutation[valid_size+test_size:]]
-        self.train_y = self.y[:, permutation[valid_size+test_size:]]
+    def split_data(self, test_index, training_ratio=0.8):
+        validation_index = int(test_index * training_ratio)
+        self.X_train = self.X[:validation_index]
+        self.Y_train = self.Y[:validation_index]
+        self.X_valid = self.X[validation_index:test_index]
+        self.Y_valid = self.Y[validation_index:test_index]
+        self.X_test = self.X[test_index:]
+        self.Y_test = self.Y[test_index:]
 
     def iterate_train(self, batch_size=16):
-        total_seqs = self.train_x.shape[1]
+        total_seqs = self.X_train_seq.shape[1]
         permutation = np.random.permutation(total_seqs)
         total_batches = total_seqs // batch_size
 
         for i in range(total_batches):
             start = i*batch_size
             end = start + batch_size
-            batch_x = self.train_x[:, permutation[start:end]]
-            batch_y = self.train_y[:, permutation[start:end]]
+            batch_x = self.X_train_seq[:, permutation[start:end]]
+            batch_y = self.Y_train_seq[:, permutation[start:end]]
             yield (batch_x, batch_y)
 
 
@@ -157,6 +146,8 @@ class NetflixModel:
         optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
         self.train_step = optimizer.minimize(self.loss)
 
+        print("ASDASDASDASD")
+        print(self.target_y.shape, self.y.shape)
         self.accuracy = tf.reduce_mean(tf.abs(self.target_y-self.y))
 
         self.sess = tf.InteractiveSession()
@@ -189,17 +180,12 @@ class NetflixModel:
         self.save()
         for e in range(epochs):
             if(verbose and e % log_period == 0):
-                # print("self.target_y:    ",str(self.target_y.shape))
-                # print("data.test_y ",str(data.test_y.shape))
-                # print(np.min(data.train_x), np.max(data.train_x))
-                # print(np.min(data.train_y), np.max(data.train_y))
-                # return
                 test_acc, test_loss = self.sess.run(
                     [self.accuracy, self.loss],
-                    {self.x: data.test_x, self.target_y: data.test_y})
+                    {self.x: data.X_test_seq, self.target_y: data.Y_test_seq})
                 valid_acc, valid_loss = self.sess.run(
                     [self.accuracy, self.loss],
-                    {self.x: data.valid_x, self.target_y: data.valid_y})
+                    {self.x: data.X_valid_seq, self.target_y: data.Y_valid_seq})
                 # MSE metric -> less is better
                 if((valid_loss < best_valid_loss and e > 0) or e == 1):
                     best_valid_loss = valid_loss
@@ -232,12 +218,15 @@ class NetflixModel:
         best_epoch, train_loss, train_acc, valid_loss, valid_acc, test_loss, test_acc = best_valid_stats
         print("Best epoch {:03d}, train loss: {:0.2f}, train mae: {:0.2f}, valid loss: {:0.2f}, valid mae: {:0.2f}, test loss: {:0.2f}, test mae: {:0.2f}".format(
             best_epoch, train_loss, train_acc, valid_loss, valid_acc, test_loss, test_acc))
-        test_predicted = self.sess.run(self.y, {self.x: data.x})
+        test_predicted = self.sess.run(self.y, {self.x: data.X_test_seq})
         print('>>>>>>>>>>>>>>>>>>>')
         print(test_predicted.shape)
 
-        y_true = np.transpose(data.y, (1, 0, 2)).reshape([-1, 1])
-        y_pred = np.transpose(test_predicted, (1, 0, 2)).reshape([-1, 1])
+        y_true = np.transpose(data.Y_test_seq, (1, 0, 2))
+        print('test_predicted', test_predicted.shape)
+        y_pred = np.transpose(test_predicted, (1, 0, 2))
+        y_true = y_true[:, -1]
+        y_pred = y_pred[:, -1]
         print(y_true.shape, y_pred.shape)
         y_true = data.scaler_y.inverse_transform(y_true)
         y_pred = data.scaler_y.inverse_transform(y_pred)
@@ -258,6 +247,7 @@ class NetflixModel:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument('--file', default='data/netflix/NFLX.csv')
     parser.add_argument('--model', default="lstm")
     parser.add_argument('--log', default=1, type=int)
     parser.add_argument('--size', default=32, type=int)
@@ -266,8 +256,8 @@ if __name__ == "__main__":
     parser.add_argument('--lr', default=1e-3, type=float)
     args = parser.parse_args()
 
-    data = NetflixData()
+    data = NetflixData(args.file)
     model = NetflixModel(model_type=args.model, model_size=args.size,
-                         input_size=data.train_x.shape[-1], learning_rate=args.lr)
+                         input_size=data.X_train.shape[-1], learning_rate=args.lr)
 
     model.fit(data, epochs=args.epochs, log_period=args.log, batch_size=args.batch_size)
