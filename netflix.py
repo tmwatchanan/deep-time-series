@@ -1,7 +1,9 @@
 import argparse
+import datetime
 import datetime as dt
 import os
 
+import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -35,9 +37,9 @@ def cut_in_sequences(x, y, seq_len, inc=1):
     for end in range(seq_len, x.shape[0]+1):
         start = end - seq_len
         sequences_x.append(x[start:end])
-        sequences_y.append(np.repeat(y[end-1], seq_len))
+        sequences_y.append(y[end-1])
 
-    return np.stack(sequences_x, axis=1), np.stack(sequences_y, axis=1)[:, :, None]
+    return np.stack(sequences_x, axis=1), np.array(sequences_y)
 
 
 class NetflixData:
@@ -53,7 +55,8 @@ class NetflixData:
         print(self.X.min(), self.X.max())
         print(self.Y.min(), self.Y.max())
 
-        self.split_data(test_index=3930, training_ratio=0.8)
+        test_index = 4687 # 4200
+        self.split_data(test_index=test_index, training_ratio=0.8)  # 3930
         print(self.X_train.shape, self.X_valid.shape, self.X_test.shape)
 
         self.X_train_seq, self.Y_train_seq = cut_in_sequences(self.X_train, self.Y_train, seq_len, inc=seq_len)
@@ -62,10 +65,12 @@ class NetflixData:
         print(self.X_train_seq.shape, self.X_valid_seq.shape, self.X_test_seq.shape)
         print(self.Y_train_seq.shape, self.Y_valid_seq.shape, self.Y_test_seq.shape)
 
+        self.dates_test = self.df.iloc[test_index+seq_len-1:, 0].values
+
     def read_netflix_stock_data(self, file_path):
-        df = pd.read_csv('data/netflix/NFLX.csv')
-        X = df[['High', 'Open', 'Low', 'Volume']].to_numpy()
-        Y = df['Close'].to_numpy()
+        self.df = pd.read_csv('data/netflix/NFLX.csv')
+        X = self.df[['High', 'Open', 'Low', 'Volume']].to_numpy()
+        Y = self.df['Close'].to_numpy()
         Y = Y[:, None]
         # for i in range(all_y.shape[1]):
         #     all_x[:, i] = moving_average(all_x[:, i], 3)
@@ -97,16 +102,16 @@ class NetflixData:
             start = i*batch_size
             end = start + batch_size
             batch_x = self.X_train_seq[:, permutation[start:end]]
-            batch_y = self.Y_train_seq[:, permutation[start:end]]
+            batch_y = self.Y_train_seq[permutation[start:end]]
             yield (batch_x, batch_y)
 
 
 class NetflixModel:
-    def __init__(self, model_type, model_size, input_size, learning_rate=0.001):
+    def __init__(self, model_type, model_size, input_size, output_size=1, learning_rate=0.001):
         self.model_type = model_type
         self.constrain_op = None
         self.x = tf.placeholder(dtype=tf.float32, shape=[None, None, input_size])
-        self.target_y = tf.placeholder(dtype=tf.float32, shape=[None, None, 1])
+        self.target_y = tf.placeholder(dtype=tf.float32, shape=[None, output_size])
 
         self.model_size = model_size
         head = self.x
@@ -137,18 +142,17 @@ class NetflixModel:
         else:
             raise ValueError("Unknown model type '{}'".format(model_type))
 
-        # target_y = tf.expand_dims(self.target_y,axis=-1)
-        self.y = tf.layers.Dense(1, activation=None, kernel_initializer=tf.keras.initializers.TruncatedNormal())(head)
-        print("logit shape: ", str(self.y.shape))
-        self.loss = tf.reduce_mean(tf.square(self.target_y-self.y))
+        self.y = tf.layers.Dense(output_size, activation=None,
+                                 kernel_initializer=tf.keras.initializers.TruncatedNormal())(head)
+        print("logit shape: ", str(self.y[-1].shape))
+        self.loss = tf.reduce_mean(tf.square(self.target_y-self.y[-1])) # MSE
         lr_fn = tf.keras.optimizers.schedules.PolynomialDecay(learning_rate, 500, 1e-5, 0.5)
-        # optimizer = tf.keras.optimizers.SGD(learning_rate=learning_rate)
         optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate)
         self.train_step = optimizer.minimize(self.loss)
 
         print("ASDASDASDASD")
-        print(self.target_y.shape, self.y.shape)
-        self.accuracy = tf.reduce_mean(tf.abs(self.target_y-self.y))
+        print(self.target_y.shape, self.y[-1].shape)
+        self.accuracy = tf.reduce_mean(tf.abs(self.target_y-self.y[-1]))
 
         self.sess = tf.InteractiveSession()
         self.sess.run(tf.global_variables_initializer())
@@ -210,30 +214,32 @@ class NetflixModel:
                 accs.append(acc)
 
             if(verbose and e % log_period == 0):
-                print("Epochs {:03d}, train loss: {:0.2f}, train mae: {:0.2f}, valid loss: {:0.2f}, valid mae: {:0.2f}, test loss: {:0.2f}, test mae: {:0.2f}".format(
+                print("Epochs {:03d}, train loss: {:0.4f}, train mae: {:0.4f}, valid loss: {:0.4f}, valid mae: {:0.4f}, test loss: {:0.4f}, test mae: {:0.4f}".format(
                     e, np.mean(losses), np.mean(accs), valid_loss, valid_acc, test_loss, test_acc))
             if(e > 0 and (not np.isfinite(np.mean(losses)))):
                 break
         self.restore()
         best_epoch, train_loss, train_acc, valid_loss, valid_acc, test_loss, test_acc = best_valid_stats
-        print("Best epoch {:03d}, train loss: {:0.2f}, train mae: {:0.2f}, valid loss: {:0.2f}, valid mae: {:0.2f}, test loss: {:0.2f}, test mae: {:0.2f}".format(
+        print("Best epoch {:03d}, train loss: {:0.4f}, train mae: {:0.4f}, valid loss: {:0.4f}, valid mae: {:0.4f}, test loss: {:0.4f}, test mae: {:0.4f}".format(
             best_epoch, train_loss, train_acc, valid_loss, valid_acc, test_loss, test_acc))
         test_predicted = self.sess.run(self.y, {self.x: data.X_test_seq})
         print('>>>>>>>>>>>>>>>>>>>')
         print(test_predicted.shape)
 
-        y_true = np.transpose(data.Y_test_seq, (1, 0, 2))
+        y_true = data.Y_test_seq
         print('test_predicted', test_predicted.shape)
-        y_pred = np.transpose(test_predicted, (1, 0, 2))
-        y_true = y_true[:, -1]
-        y_pred = y_pred[:, -1]
+        y_pred = test_predicted[-1]
         print(y_true.shape, y_pred.shape)
         y_true = data.scaler_y.inverse_transform(y_true)
         y_pred = data.scaler_y.inverse_transform(y_pred)
         fig, ax = plt.subplots(figsize=(12, 4))
-        ax.plot(y_true, color='black', linewidth=.9)
-        ax.plot(y_pred, color='green', linewidth=.8, linestyle='dashed')
-        ax.set_xlim(0, len(y_true)-1)
+        ax.plot(data.dates_test, y_true, color='black', linewidth=.9)
+        ax.plot(data.dates_test, y_pred, color='green', linewidth=.8, linestyle='dashed')
+        ax = plt.gca()
+        ax.set_xlim([data.dates_test[0], data.dates_test[-1]])
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        # ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y'))
+        plt.gcf().autofmt_xdate()  # Rotation
         plt.savefig(f'netflix-{self.model_type}_{self.model_size}.png', dpi=300, bbox_inches='tight')
 
         with open(self.result_file, "a") as f:
@@ -254,9 +260,10 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', default=200, type=int)
     parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--lr', default=1e-3, type=float)
+    parser.add_argument('--seq_len', default=32, type=int)
     args = parser.parse_args()
 
-    data = NetflixData(args.file)
+    data = NetflixData(args.file, args.seq_len)
     model = NetflixModel(model_type=args.model, model_size=args.size,
                          input_size=data.X_train.shape[-1], learning_rate=args.lr)
 
